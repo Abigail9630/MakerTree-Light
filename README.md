@@ -46,7 +46,7 @@ cd ~/Desktop/MakerTree-Light
 git add -A
 git commit -m "MakerTree-Light — initial Streamlit app"
 
-git remote add origin https://github.com/YOUR_USERNAME/MakerTree-Light.git
+git remote add origin https://github.com/Abigail9630/MakerTree-Light.git
 git push -u origin main
 ```
 
