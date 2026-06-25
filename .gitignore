@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.streamlit/secrets.toml
+.env
+.env.*
+.DS_Store
+*.log
+
+# Local editor / OS noise (optional — keeps repo clean)
+.cursor/
+
+# Large loose image at repo root (duplicate; assets/ has the real files)
+/Roots.jpg
