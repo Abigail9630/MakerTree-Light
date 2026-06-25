@@ -14,7 +14,9 @@ try:
 except ImportError:
     genai = None
 
-st.set_page_config(page_title="Maker Tree", layout="wide", initial_sidebar_state="collapsed")
+from talis_gemma import gemma_setup_hint, llama_cpp_available, ollama_available, run_gemma
+
+st.set_page_config(page_title="MakerTree Beta", layout="wide", initial_sidebar_state="collapsed")
 
 # Sycamore Grove onboarding — first launch + optional return from Soil / Picnic
 grove_flag = Path.home() / ".maker_tree_grove_completed"
@@ -72,6 +74,20 @@ button[data-testid="stSidebarCollapsedControl"],
 button[data-testid="collapsedControl"] {
     display: none !important;
 }
+
+@media (max-width: 640px) {
+    html, body, [class*="css"], .stMarkdown, .stTextArea, .stButton>button {
+        font-size: 17px !important;
+    }
+    .stButton>button {
+        min-height: 48px !important;
+        padding: 0.6rem 1rem !important;
+    }
+    .tree-progress-caption {
+        font-size: 0.85rem !important;
+        line-height: 1.5 !important;
+    }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -100,6 +116,112 @@ SECTION_BANNERS = {
     "Soil": ("assets/reference-photos/Soil.jpg", "center 45%"),
     "Picnic": ("assets/images/central-tree.jpg", "48% 96%"),
 }
+
+# Main maker journey (Picnic and Help are side paths off the tree)
+TREE_FLOW = ["Rain", "Roots", "Trunk", "Branches", "Bark", "Leaves", "Soil"]
+
+
+def go_to_section(section: str) -> None:
+    st.session_state["pending_section"] = section
+    st.rerun()
+
+
+def get_gemini_api_key() -> str:
+    """Optional cloud key — env var, Streamlit secrets, or session paste."""
+    if "gemini_api_key" not in st.session_state:
+        env_key = os.environ.get("GEMINI_API_KEY", "")
+        try:
+            secrets_key = st.secrets.get("GEMINI_API_KEY", "")
+        except (FileNotFoundError, KeyError, AttributeError):
+            secrets_key = ""
+        st.session_state.gemini_api_key = env_key or secrets_key or ""
+    return st.session_state.gemini_api_key
+
+
+def get_llama_cpp_host() -> str:
+    """llama.cpp server URL — session override, secrets, env, or default."""
+    if st.session_state.get("llama_cpp_host", "").strip():
+        return st.session_state.llama_cpp_host.strip().rstrip("/")
+    try:
+        secrets_host = st.secrets.get("LLAMA_CPP_HOST", "")
+    except (FileNotFoundError, KeyError, AttributeError):
+        secrets_host = ""
+    return (
+        secrets_host
+        or os.environ.get("LLAMA_CPP_HOST")
+        or "http://127.0.0.1:8080"
+    ).rstrip("/")
+
+
+def render_tree_progress(section: str) -> None:
+    """Show where the maker is in the Rain → Soil cycle."""
+    if section not in TREE_FLOW:
+        return
+    idx = TREE_FLOW.index(section)
+    st.progress((idx + 1) / len(TREE_FLOW))
+    labels = [f"**{name}**" if i == idx else name for i, name in enumerate(TREE_FLOW)]
+    st.markdown(
+        f'<p class="tree-progress-caption">{" → ".join(labels)}</p>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_flow_step_nav(section: str) -> None:
+    """Compact previous / next step links along the main tree path."""
+    if section not in TREE_FLOW:
+        return
+    idx = TREE_FLOW.index(section)
+    prev_section = TREE_FLOW[idx - 1] if idx > 0 else None
+    next_section = TREE_FLOW[idx + 1] if idx < len(TREE_FLOW) - 1 else None
+    if not prev_section and not next_section:
+        return
+    col_prev, col_next = st.columns(2)
+    with col_prev:
+        if prev_section:
+            if st.button(
+                f"← Back: {prev_section}",
+                key=f"flow_prev_{section}",
+                use_container_width=True,
+            ):
+                go_to_section(prev_section)
+    with col_next:
+        if next_section:
+            if st.button(
+                f"Next: {next_section} →",
+                key=f"flow_next_{section}",
+                use_container_width=True,
+            ):
+                go_to_section(next_section)
+
+
+def render_optional_api_settings(expanded: bool = False) -> None:
+    """Optional Gemini + Gemma notes — not required for most of the app."""
+    with st.expander("Optional settings — cloud AI (not required)", expanded=expanded):
+        st.markdown(
+            "**Most of MakerTree works without any API key.** "
+            "You can write, upload CSVs, and move through the tree offline. "
+            f"{gemma_setup_hint()} "
+            "**Gemini (optional, cloud):** only if you tap *Parse with Gemini* on **Roots**."
+        )
+        key = st.text_input(
+            "Gemini API key (optional)",
+            value=get_gemini_api_key(),
+            type="password",
+            key="settings_gemini_key",
+            help="Stored for this browser session only unless you use an environment variable.",
+        )
+        st.session_state.gemini_api_key = key
+        st.text_input(
+            "llama.cpp server URL (local Talis — optional)",
+            value=get_llama_cpp_host(),
+            key="llama_cpp_host",
+            placeholder="http://127.0.0.1:8086",
+            help="Port must match your llama-server --port. Framework works without this.",
+        )
+        st.caption(
+            "Or set `GEMINI_API_KEY` / `LLAMA_CPP_HOST` in environment or `.streamlit/secrets.toml` "
+            "(see `.streamlit/secrets.toml.example`). Never commit real keys."
+        )
 
 
 def render_app_header() -> None:
@@ -156,7 +278,7 @@ def render_app_header() -> None:
         if st.button(
             "MakerTree",
             key="nav_home_title",
-            help="Back to the main tree",
+            help="Back to the main tree — MakerTree Beta",
         ):
             go_home = True
 
@@ -282,34 +404,40 @@ def render_sycamore_grove() -> None:
 
 def render_section_banner(section: str) -> None:
     """Render a slim cropped banner (like index.html project view)."""
-    rel_path, object_pos = SECTION_BANNERS.get(section, (None, "center 20%"))
-    if rel_path:
-        banner_file = os.path.join(script_dir, rel_path)
-    else:
-        banner_file = tree_image_path
-        object_pos = "center 20%"
+    try:
+        rel_path, object_pos = SECTION_BANNERS.get(section, (None, "center 20%"))
+        if rel_path:
+            banner_file = os.path.join(script_dir, rel_path)
+        else:
+            banner_file = tree_image_path
+            object_pos = "center 20%"
 
-    if not banner_file or not os.path.exists(banner_file):
-        return
+        if not banner_file or not os.path.exists(banner_file):
+            st.caption("Banner image loading — you can keep working below.")
+            return
 
-    with open(banner_file, "rb") as img_file:
-        b64 = base64.b64encode(img_file.read()).decode()
-    st.markdown(
-        f"""
-        <div style="
-            width: 100%;
-            height: 140px;
-            overflow: hidden;
-            border-radius: 12px;
-            margin-bottom: 0.5rem;
-            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
-        ">
-            <img src="data:image/jpeg;base64,{b64}"
-                 style="width:100%; height:100%; object-fit: cover; object-position: {object_pos}; display: block;" />
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        with open(banner_file, "rb") as img_file:
+            b64 = base64.b64encode(img_file.read()).decode()
+        st.markdown(
+            f"""
+            <div style="
+                width: 100%;
+                height: 140px;
+                overflow: hidden;
+                border-radius: 12px;
+                margin-bottom: 0.5rem;
+                box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+            ">
+                <img src="data:image/jpeg;base64,{b64}"
+                     style="width:100%; height:100%; object-fit: cover; object-position: {object_pos}; display: block;" />
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    except OSError:
+        st.caption("Banner image unavailable — continuing without it.")
+    except Exception:
+        st.caption("Something went wrong loading the banner — you can keep working below.")
 
 
 def parse_with_gemini(brain_dump: str, api_key: str) -> str:
@@ -384,6 +512,14 @@ if 'page_content' not in st.session_state:
             "fallenLeaves": "",
             "inactiveProducts": "",
         },
+        "Picnic": {
+            "journal": "",
+            "journalDate": "",
+            "stallType": "",
+            "talisNotes": "",
+            "makerCategory": "",
+            "profileTools": "",
+        },
         "Roots": {
             "firstHeader": "Raw Ideas",
             "brainDump": "Roots\n\nWhere the real grounding happens. This is where the agent steps in to help parse the rain into clear, usable ideas. We sort, research, identify competitive advantage, decide on materials, price points, and processes. The roots keep the whole tree stable. You can click directly here if you've already dumped in the rain.",
@@ -456,11 +592,408 @@ talis_chips = {
         "Ideas to refresh slow leaves",
     ],
     "Picnic": [
-        "Help me reflect on why I make",
-        "What brings me joy in this work?",
-        "What feels heavy or wonderful?",
+        "What feels heavy or wonderful right now?",
+        "What part of this process is closest to what you see in your head?",
+        "One small thing that would feel like rest",
+        "No thanks — just let me write",
     ],
 }
+
+# Sycamore Grove maker categories (Define-MakerTree.md) — seeds Gemma / Picnic niche packs
+GROVE_CATEGORIES = [
+    "Paper & Binding",
+    "Fiber & Textiles",
+    "Leather & Stitch",
+    "Wood & Carving",
+    "Clay & Ceramics",
+    "Mark Making",
+    "Metal & Forge",
+    "Homestead Craft",
+]
+
+PICNIC_STALL_TYPES = {
+    "imposter": "Imposter syndrome — not sure I'm a real maker",
+    "skill_gap": "Missing a skill to finish what I started",
+    "over_excited": "Over-excited about one idea — can't settle",
+    "fear": "Afraid — pricing, visibility, or judgment",
+    "rest": "Just need rest (not stuck, just tired)",
+    "other": "Something else — I'll write it",
+}
+
+# Extra chips per craft — merged with base Picnic chips in the UI
+NICHE_PICNIC_CHIPS: dict[str, list[str]] = {
+    "Fiber & Textiles": [
+        "Everyone else seems more skilled at finishing",
+        "This fabric / stitch is harder than I thought",
+        "I'm excited about every colorway at once",
+    ],
+    "Wood & Carving": [
+        "Afraid to ruin expensive stock on the lathe",
+        "My work doesn't look 'professional' enough",
+        "I bought a new tool and haven't touched it",
+    ],
+    "Clay & Ceramics": [
+        "Kiln results never match what I pictured",
+        "Comparing my pots to Instagram makers",
+        "One glaze idea has taken over everything else",
+    ],
+    "Metal & Forge": [
+        "Scared of the heat / equipment",
+        "Who am I to call myself a smith?",
+        "One blade design won't leave my head",
+    ],
+    "Homestead Craft": [
+        "Labeling / legal stuff feels overwhelming",
+        "My kitchen experiments aren't 'real' products",
+        "Too many jar flavors to pick one",
+    ],
+}
+
+# Where Talis may gently send the maker after Picnic (not mandatory workflow steps)
+PICNIC_RETURN_HINTS: dict[str, list[tuple[str, str]]] = {
+    "imposter": [
+        ("Roots", "Ground the idea — what's actually yours?"),
+        ("Trunk", "Small proof make — one piece, no audience"),
+        ("Rain", "Pour it out again — no sorting yet"),
+    ],
+    "skill_gap": [
+        ("Trunk", "Tools & steps — break the skill into one lesson"),
+        ("Help", "Find a class, book, or mentor"),
+        ("Roots", "Clarify what 'done' looks like"),
+    ],
+    "over_excited": [
+        ("Roots", "Pick one product to carry forward"),
+        ("Rain", "Brain dump everything — Talis sorts later"),
+        ("Trunk", "Reality-check materials and time"),
+    ],
+    "fear": [
+        ("Bark", "One small post — process, not perfection"),
+        ("Branches", "Smallest sales step (one channel)"),
+        ("Picnic", "Stay here longer"),
+    ],
+    "rest": [
+        ("Welcome", "Back to the tree when ready"),
+    ],
+    "other": [
+        ("Rain", "Brain dump"),
+        ("Welcome", "Choose another branch"),
+    ],
+}
+
+# Preview responses until Gemma is wired (category + stall → warm Talis voice)
+PICNIC_TALIS_PREVIEW: dict[tuple[str, str], str] = {
+    (
+        "Fiber & Textiles",
+        "imposter",
+    ): (
+        "Seamstresses and upcyclers often feel like 'real' makers only if the inside finish is perfect. "
+        "Your edge may be the story in the fabric, not factory polish. One small finished piece counts."
+    ),
+    (
+        "Wood & Carving",
+        "skill_gap",
+    ): (
+        "On the lathe, the gap is usually one setup — speed, gouge, or grain direction — not your talent. "
+        "Trunk is the place for one practice blank before the piece you care about."
+    ),
+    (
+        "Clay & Ceramics",
+        "over_excited",
+    ): (
+        "When every glaze idea fires at once, pick one test tile this week. The rest can wait in Rain "
+        "without dying — you are not losing them."
+    ),
+    (
+        "Metal & Forge",
+        "fear",
+    ): (
+        "Visibility fear is common at the anvil — the work feels personal because it is. "
+        "Bark can hold a 10-second spark clip with no shop link; nothing has to go on sale yet."
+    ),
+}
+
+
+def _picnic_page_data() -> dict:
+    data = st.session_state.page_content.setdefault("Picnic", {})
+    if not data.get("journal", "").strip():
+        legacy = st.session_state.notes_history.get("Picnic", "")
+        if legacy.strip():
+            data["journal"] = legacy
+    data.setdefault("journalDate", "")
+    data.setdefault("stallType", "")
+    data.setdefault("talisNotes", "")
+    data.setdefault("makerCategory", "")
+    return data
+
+
+def _picnic_chips_for_category(category: str) -> list[str]:
+    base = list(talis_chips["Picnic"])
+    extra = NICHE_PICNIC_CHIPS.get(category, [])
+    return base + extra
+
+
+def build_gemma_picnic_prompt(
+    journal: str,
+    stall_key: str,
+    category: str,
+    maker_profile: dict | None = None,
+) -> str:
+    """
+    Prompt harness for Gemma-as-Talis on Picnic (local model, niche-aware).
+    maker_profile will come from Sycamore Grove form / session; guardrails in Talis.md.
+    """
+    stall_label = PICNIC_STALL_TYPES.get(stall_key, stall_key or "unspecified")
+    profile = maker_profile or {}
+    tools = profile.get("tools", "not specified")
+    materials = profile.get("materials", "not specified")
+    experience = profile.get("experience", "not specified")
+    return f"""You are Talis, a gentle female maker mentor under a sycamore tree — not a therapist, not corporate.
+
+Maker primary craft: {category or "general maker"}
+Tools: {tools}
+Materials: {materials}
+Experience: {experience}
+
+They sat down at the Picnic because: {stall_label}
+
+Guardrails:
+- Never diagnose. Never bombard with questions. At most ONE gentle question OR one reflection.
+- Normalize stall (imposter, fear, over-excitement, skill gaps) without toxic positivity.
+- Suggest ONE place in the tree if helpful: Rain (dump), Roots (ground idea), Trunk (skill/tools), Bark (visibility), Branches (sales), or stay at Picnic.
+- Tailor language to their craft ({category}).
+- First person, warm, no "we/our", no "magic".
+
+What they wrote:
+{journal.strip() or "(quiet — just sitting)"}
+
+Respond in 3–5 short sentences. End with an optional single question only if it unlocks something."""
+
+
+def talis_picnic_preview_response(category: str, stall_key: str, journal: str) -> str:
+    """Static niche preview until Gemma runs locally."""
+    key = (category, stall_key)
+    if key in PICNIC_TALIS_PREVIEW:
+        body = PICNIC_TALIS_PREVIEW[key]
+    elif stall_key == "rest":
+        body = "Rest is part of the cycle — not a detour. You do not have to produce anything to belong here."
+    elif stall_key == "imposter":
+        body = (
+            "Imposter feelings mean you care about the work — not that you are faking. "
+            "Many makers stall here before Trunk, not because the idea is wrong."
+        )
+    elif stall_key == "skill_gap":
+        body = (
+            "A missing skill is a Trunk problem, not a character flaw. "
+            "One tutorial, one practice piece, or one human who has done it before."
+        )
+    elif stall_key == "over_excited":
+        body = (
+            "Excitement is rain energy — beautiful and messy. Roots can hold one thread "
+            "while the rest waits without shame."
+        )
+    elif stall_key == "fear":
+        body = (
+            "Fear of being seen is common when the work feels personal. "
+            "You can take a smaller step in Bark without committing to the whole shop."
+        )
+    else:
+        body = (
+            "I am here with you on the quilt. Write what is true; when you are ready, "
+            "the tree still has a branch that fits."
+        )
+    if journal.strip():
+        body += f"\n\nYou wrote: “{journal.strip()[:200]}{'…' if len(journal.strip()) > 200 else ''}” — I hear you."
+    return body
+
+
+def render_picnic_page() -> None:
+    """Picnic — side path for inner work; not an end point in the tree cycle."""
+    data = _picnic_page_data()
+    st.subheader("Picnic on the quilt")
+    st.caption(
+        "Side path — not a step in the Rain → Soil cycle. Sit as long as you need. "
+        "Stalls here (imposter feelings, skill gaps, over-excitement, fear) get named so "
+        "you can re-enter the tree when ready — not because you failed."
+    )
+    st.markdown(
+        "*Talis is a gentle companion, not a therapist. For anything heavy, reach a real person you trust.*"
+    )
+
+    with st.expander("Your maker profile (for Talis — from Grove or pick here)"):
+        st.caption(
+            "Gemma uses this to tailor Picnic advice — seamstress vs woodturner vs potter. "
+            "Update anytime; Grove form will fill this automatically later."
+        )
+        category = st.selectbox(
+            "Primary craft",
+            [""] + GROVE_CATEGORIES,
+            index=(
+                (GROVE_CATEGORIES.index(data["makerCategory"]) + 1)
+                if data.get("makerCategory") in GROVE_CATEGORIES
+                else 0
+            ),
+            key="picnic_maker_category",
+            placeholder="Choose your grove category…",
+        )
+        if category:
+            data["makerCategory"] = category
+        profile_tools = st.text_input(
+            "Main tools (short)",
+            value=data.get("profileTools", ""),
+            key="picnic_profile_tools",
+            placeholder="e.g. serger, dress form / lathe, gouges",
+        )
+        data["profileTools"] = profile_tools
+
+    st.markdown("**Journal this Workflow**")
+    stored_date = data.get("journalDate", "")
+    if stored_date:
+        try:
+            default_journal_date = datetime.strptime(stored_date, "%Y-%m-%d").date()
+        except ValueError:
+            default_journal_date = datetime.now().date()
+    else:
+        default_journal_date = datetime.now().date()
+    journal_date = st.date_input(
+        "Date",
+        value=default_journal_date,
+        key="picnic_journal_date",
+        format="MMM D, YYYY",
+    )
+    journal = st.text_area(
+        "Picnic journal",
+        value=data.get("journal", ""),
+        height=200,
+        key="picnic_journal",
+        label_visibility="collapsed",
+        placeholder=(
+            "Express how you're feeling about your projects right now. "
+            "Imposter thoughts, a skill you lack, one idea taking over — no pressure."
+        ),
+    )
+
+    st.markdown("**What kind of stall is this?** *(helps Talis tailor — optional)*")
+    stall_options = [""] + list(PICNIC_STALL_TYPES.keys())
+    stall_labels = ["Choose if it fits…"] + list(PICNIC_STALL_TYPES.values())
+    stall_index = (
+        stall_options.index(data["stallType"])
+        if data.get("stallType") in stall_options
+        else 0
+    )
+    stall_choice = st.selectbox(
+        "Stall type",
+        options=range(len(stall_options)),
+        format_func=lambda i: stall_labels[i],
+        index=stall_index,
+        key="picnic_stall_select",
+        label_visibility="collapsed",
+    )
+    stall_key = stall_options[stall_choice] if stall_choice > 0 else ""
+
+    category = data.get("makerCategory", "")
+    chips = _picnic_chips_for_category(category) if category else talis_chips["Picnic"]
+
+    st.markdown(f"**{TALIS_HELP_LABEL}**")
+    st.caption(TALIS_HELP_CAPTION)
+    chip_cols = st.columns(2)
+    for i, chip in enumerate(chips):
+        with chip_cols[i % 2]:
+            if st.button(chip, key=f"chip_Picnic_{i}"):
+                curr = data.get("talisNotes", "")
+                data["talisNotes"] = curr + "\n\n" + chip if curr.strip() else chip
+                st.rerun()
+
+    st.markdown("**Talis**")
+    talis_notes = st.text_area(
+        "Talis",
+        value=data.get("talisNotes", ""),
+        height=140,
+        key="picnic_talis",
+        label_visibility="collapsed",
+        placeholder="Talis may reflect here — warm, brief, no pressure.",
+    )
+
+    llama_host = get_llama_cpp_host()
+    if llama_cpp_available(llama_host):
+        backend = "llama_cpp"
+    elif ollama_available():
+        backend = "ollama"
+    else:
+        backend = None
+    if backend == "llama_cpp":
+        st.caption(f"Talis (Gemma 2B, local) is ready — llama.cpp at `{llama_host}`.")
+    elif backend == "ollama":
+        st.caption("Talis (Gemma 2B, local) is ready — Ollama.")
+    else:
+        st.caption(gemma_setup_hint())
+
+    if st.button("Ask Talis", use_container_width=True, key="picnic_ask_talis"):
+        prompt = build_gemma_picnic_prompt(
+            journal,
+            stall_key,
+            category,
+            {
+                "tools": data.get("profileTools", ""),
+                "materials": "",
+                "experience": "",
+            },
+        )
+        with st.spinner("Talis is thinking…"):
+            text, err = run_gemma(prompt, host=llama_host)
+        if err:
+            st.warning(err)
+            data["talisNotes"] = (
+                talis_picnic_preview_response(category, stall_key, journal)
+                + f"\n\n*(Gemma offline — using a gentle fallback. {err})*"
+            )
+        else:
+            data["talisNotes"] = text
+        data["journal"] = journal
+        data["journalDate"] = journal_date.isoformat()
+        data["stallType"] = stall_key
+        st.session_state.notes_history["Picnic"] = journal
+        st.rerun()
+
+    with st.expander("How Talis personalizes for your craft"):
+        st.markdown(
+            """
+**Your Grove profile** — craft category and tools from Sycamore Grove (or pick above).
+
+**Stall type** — imposter, skill gap, over-excitement, fear, or rest shapes how Talis responds.
+
+**Niche packs** — craft-specific suggestions (fiber, wood, clay, metal, and more).
+
+**Gemma 2B on your machine** — local Talis voice through Ollama; **no API key**. Guardrails in `Talis.md`.
+            """
+        )
+
+    st.divider()
+    st.markdown("**When you're ready — where next?**")
+    st.caption("Suggestions only. Picnic is not an exit — pick a branch or return to the tree.")
+    hints = PICNIC_RETURN_HINTS.get(stall_key or "other", PICNIC_RETURN_HINTS["other"])
+    hint_cols = st.columns(min(len(hints), 3))
+    for i, (branch, hint) in enumerate(hints):
+        with hint_cols[i % len(hint_cols)]:
+            if st.button(f"{branch}", key=f"picnic_go_{branch}_{i}", use_container_width=True):
+                data["journal"] = journal
+                data["journalDate"] = journal_date.isoformat()
+                data["talisNotes"] = talis_notes
+                data["stallType"] = stall_key
+                st.session_state.notes_history["Picnic"] = journal
+                if branch == "Picnic":
+                    st.rerun()
+                else:
+                    go_to_section(branch if branch != "Welcome" else "Welcome")
+
+    if st.button("Save Picnic", use_container_width=True, key="picnic_save"):
+        data["journal"] = journal
+        data["journalDate"] = journal_date.isoformat()
+        data["talisNotes"] = talis_notes
+        data["stallType"] = stall_key
+        st.session_state.notes_history["Picnic"] = journal
+        st.success("Saved. Take your time — the tree will be here.")
+
+    render_return_to_grove_button("Picnic")
 
 
 RAIN_TALIS_PROJECT_NOTES_STARTER = """Talis sorts your vision toward Roots and daily life toward Picnic. This is her sorted list — numbered so you can see what she noticed. (This is not another brain dump.)
@@ -615,7 +1148,7 @@ def render_rain_page() -> None:
     st.markdown("**Corrections for Talis**")
     st.caption(
         "If something landed in the wrong place, or you want Talis to sort differently, say so here. "
-        "One box — not a long chat — keeps the light app calm."
+        "One box — not a long chat — keeps MakerTree Beta calm."
     )
     talis_corrections = st.text_area(
         "Corrections for Talis",
@@ -961,7 +1494,7 @@ upload it on **Leaves**. If something does not sort correctly, you can still edi
 - **Soil** — inventory and year-end summaries  
 - **Bark** — traffic and social analytics files  
 
-Same idea: export once, upload, let Talis help you read it — not live API connections in the light app.
+Same idea: export once, upload, let Talis help you read it — not live API connections in MakerTree Beta.
         """
     )
 
@@ -1001,14 +1534,17 @@ def render_leaves_page() -> None:
     if uploaded is not None:
         st.caption(f"File: {uploaded.name}")
         if st.button("Sort into Fallen Leaves", use_container_width=True, key="leaves_apply_csv"):
-            formatted, err = format_sales_csv_to_fallen_leaves(uploaded.getvalue())
-            if err:
-                st.error(err)
-            else:
-                st.session_state.page_content["Leaves"]["fallenLeaves"] = formatted
-                st.session_state.notes_history["Leaves"] = formatted
-                st.success(f"Sorted {uploaded.name} into Fallen Leaves — highest to lowest.")
-                st.rerun()
+            try:
+                formatted, err = format_sales_csv_to_fallen_leaves(uploaded.getvalue())
+                if err:
+                    st.error(err)
+                else:
+                    st.session_state.page_content["Leaves"]["fallenLeaves"] = formatted
+                    st.session_state.notes_history["Leaves"] = formatted
+                    st.success(f"Sorted {uploaded.name} into Fallen Leaves — highest to lowest.")
+                    st.rerun()
+            except Exception:
+                st.error("Could not read that file. Try exporting again as CSV from your shop.")
 
     st.markdown("**Fallen Leaves**")
     st.caption("Sales, Reviews, and Customer Feedback")
@@ -1095,7 +1631,7 @@ if section == "Welcome":
         st.markdown("""
 <div style="text-align: center; margin-top: 12px; margin-bottom: 24px;">
     <h3 style="margin-bottom: 4px;">Talis.</h3>
-    <p style="margin-top: 0; font-size: 1.05rem;">A living Sycamore to help you design, create, and grow your creative business.</p>
+    <p style="margin-top: 0; font-size: 1.05rem;">MakerTree Beta — a living Sycamore to help you design, create, and grow your creative business.</p>
 </div>
 """, unsafe_allow_html=True)
     else:
@@ -1103,7 +1639,22 @@ if section == "Welcome":
         st.image("https://via.placeholder.com/700x500/8B4513/FFFFFF?text=MakerTree", use_container_width=True)
 
     st.subheader("Where do you want to begin?")
-    st.caption("Tap a branch below. Everything stays light and local.")
+    st.caption("Tap a branch below. Local-first — your tree, your machine.")
+
+    render_optional_api_settings(expanded=False)
+
+    with st.expander("How AI personalization works (short version)"):
+        st.markdown(
+            """
+**Today:** Talis uses your words, section guardrails, and **Ways Talis can help** chips — no key required.
+
+**Gemma 2B (local):** Your **Sycamore Grove** profile shapes Picnic and Talis — craft-specific, on your machine via Ollama (`gemma2:2b`). Tap **Ask Talis** on Picnic.
+
+**Optional Gemini (cloud):** One parse on **Roots** only if you choose.
+
+See README for example persona outputs.
+            """
+        )
 
     # Tree navigation placed underneath the image (big tappable targets for mobile)
     # On desktop this will sit to the right of the flow naturally; on phone it stacks cleanly below.
@@ -1129,6 +1680,7 @@ else:
 
     # Banner at top for all subpages — cropped like index.html (object-fit + object-position)
     render_section_banner(section)
+    render_tree_progress(section)
 
     # Replicate structure from index.html project view for Rain, Roots, Bark, Soil:
     # (logo + banner already rendered above) + Brain Dump + Solutions & Processes + Agent + Current Project Notes
@@ -1159,22 +1711,34 @@ else:
                 label_visibility="collapsed"
             )
 
-        # Gemini Xprize call - specifically in Roots for competitive advantage + guardrails
+        # Optional Gemini on Roots — cloud call for X Prize; skip if you work by hand
         if section == "Roots":
-            gemini_key = st.text_input(
-                "Gemini API Key (paste from Google AI Studio - required for Xprize one-call compliance; $20 plan recommended)",
-                type="password",
-                key="gemini_key_roots"
-            )
-            if st.button("Parse Brain Dump with Gemini (Xprize-required call + guardrails)", use_container_width=True):
-                if gemini_key and genai:
-                    result = parse_with_gemini(brain, gemini_key)
-                    st.success("Gemini response (copy key parts into Talis below):")
-                    st.markdown(result)
-                    # Auto-update agentComments with the result for persistence
-                    st.session_state.page_content[section]["agentComments"] = result
+            render_optional_api_settings(expanded=False)
+            if st.button(
+                "Parse Brain Dump with Gemini (optional — X Prize)",
+                use_container_width=True,
+                key="roots_parse_gemini",
+            ):
+                gemini_key = get_gemini_api_key()
+                if not genai:
+                    st.warning(
+                        "Gemini library not installed. Run: pip install google-generativeai "
+                        "— or keep working by hand; no key required for the rest of the app."
+                    )
+                elif not gemini_key:
+                    st.info(
+                        "No Gemini key yet — open **Optional settings** above or set GEMINI_API_KEY. "
+                        "You can skip this and continue through the tree."
+                    )
                 else:
-                    st.error("Need valid Gemini API key. Get one at https://aistudio.google.com/app/apikey (or use the $20 plan for quota). Local stub below still works.")
+                    with st.spinner("Talis is reading your roots…"):
+                        result = parse_with_gemini(brain, gemini_key)
+                    if result.startswith("Gemini call failed"):
+                        st.error(result)
+                    else:
+                        st.success("Gemini response — copy key parts into Talis below if helpful:")
+                        st.markdown(result)
+                        st.session_state.page_content[section]["agentComments"] = result
 
         if section == "Bark":
             st.markdown("**New Channels to try**")
@@ -1290,7 +1854,23 @@ See full in Talis.md
                 st.session_state["pending_section"] = "Leaves"
                 st.rerun()
 
+        if section == "Roots":
+            if st.button("Move on to the Trunk", use_container_width=True, key="roots_to_trunk"):
+                st.session_state.page_content[section]["brainDump"] = brain
+                st.session_state.page_content[section]["solutions"] = solutions
+                st.session_state.page_content[section]["agentComments"] = agent
+                st.session_state.notes_history[section] = current_notes
+                st.session_state["pending_section"] = "Trunk"
+                st.rerun()
+
         if section == "Soil":
+            if st.button("Move on to the Rain — start next cycle", use_container_width=True, key="soil_to_rain"):
+                st.session_state.page_content[section]["brainDump"] = brain
+                st.session_state.page_content[section]["solutions"] = solutions
+                st.session_state.page_content[section]["agentComments"] = agent
+                st.session_state.notes_history[section] = current_notes
+                st.session_state["pending_section"] = "Rain"
+                st.rerun()
             render_return_to_grove_button("Soil")
 
     elif section == "Trunk":
@@ -1344,34 +1924,7 @@ See full in Talis.md
         render_help_page()
 
     elif section == "Picnic":
-        st.write("Quilt on the grass — peaceful inner work. Fears, joy, imposter feelings, rest, character growth.")
-        st.text_area("Sit here a while", "What feels heavy or wonderful today?", height=200, key="picnic_sit")
+        render_picnic_page()
 
-        # Chips for Picnic
-        if "Picnic" in talis_chips:
-            st.markdown(f"**{TALIS_HELP_LABEL}**")
-            st.caption(TALIS_HELP_CAPTION)
-            chip_cols = st.columns(4)
-            for i, chip in enumerate(talis_chips["Picnic"]):
-                with chip_cols[i % 4]:
-                    if st.button(chip, key=f"chip_Picnic_{i}"):
-                        curr = st.session_state.notes_history.get("Picnic", "")
-                        new = curr + "\n\n" + chip if curr.strip() else chip
-                        st.session_state.notes_history["Picnic"] = new
-                        st.rerun()
-
-        st.divider()
-        st.subheader("Your notes for Picnic")
-        picnic_note = st.text_area(
-            "Add anything you want to remember or carry forward",
-            st.session_state.notes_history.get("Picnic", ""),
-            height=200,
-            key="note_Picnic"
-        )
-        if st.button("Save notes for Picnic"):
-            st.session_state.notes_history["Picnic"] = picnic_note
-            st.success("Saved.")
-
-        render_return_to_grove_button("Picnic")
-
+    render_flow_step_nav(section)
     render_back_to_tree_button(section)

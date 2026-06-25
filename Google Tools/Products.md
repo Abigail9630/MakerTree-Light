@@ -1,6 +1,6 @@
-# Google Products Used in MakerTree-Light
+# Google Products Used in MakerTree-Beta
 
-This document tracks all Google products, services, and tools used in the MakerTree-Light application (the lightweight Streamlit edition of MakerTree). This is for documentation purposes as part of the Xprize submission, to ensure full transparency on dependencies and technologies.
+This document tracks Google products used in **MakerTree-Beta** (Streamlit edition of MakerTree). For X Prize submission transparency.
 
 ## Google Fonts
 
@@ -35,7 +35,7 @@ This document tracks all Google products, services, and tools used in the MakerT
 - **Notes**: The logo maintains a circular design as per requirements. This is a creative asset, not runtime dependency. For Xprize, note that Gemini was used for asset creation only.
 
 ## Other Notes on Google Dependencies
-- No other Google products (e.g., Google Analytics, Firebase, Maps, YouTube embeds, reCAPTCHA, or cloud services) are currently used in MakerTree-Light.
+- No other Google products are currently used in MakerTree-Beta.
 - The app is designed to be lightweight and local-first (Streamlit with minimal external calls).
 - Fonts load from Google CDN for ease, but the core functionality (navigation, editable sections for Rain/Roots/etc., local model stubs) does not require Google services at runtime.
 - If additional Google tools are integrated in the future (e.g., for AI features in Roots section), they will be documented here immediately.
