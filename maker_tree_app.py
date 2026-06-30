@@ -905,7 +905,7 @@ def render_picnic_page() -> None:
         "Date",
         value=default_journal_date,
         key="picnic_journal_date",
-        format="MMM D, YYYY",
+        format="MM/DD/YYYY",
     )
     journal = st.text_area(
         "Picnic journal",
