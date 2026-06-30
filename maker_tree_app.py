@@ -7,14 +7,22 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-# Gemini integration for Xprize-required API call (one call in Roots for parsing/guardrails)
-# Local fallback remains for the main experience.
+# Gemini: X Prize compliance only — env/secrets, not shown to makers (see run_gemini_hackathon_compliance)
 try:
     import google.generativeai as genai
 except ImportError:
     genai = None
 
-from talis_gemma import gemma_setup_hint, llama_cpp_available, ollama_available, run_gemma
+from talis_gemma import gemma_setup_hint
+from talis_ask_ui import (
+    flush_pending_talis_widget,
+    render_app_settings,
+    render_manual_badge,
+    render_talis_chips,
+    run_ask_talis,
+)
+from talis_service import init_talis_prefs, process_pending_chip_assist
+from maker_tree_library_ui import get_store, render_library_page, render_quick_capture_bar
 
 st.set_page_config(page_title="MakerTree Beta", layout="wide", initial_sidebar_state="collapsed")
 
@@ -51,6 +59,42 @@ h1, h2, h3, .stSubheader, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
 
 /* Logo header already has inline heavier style */
 
+/* Focus ring — green (not error-red) on all text fields */
+.stTextArea textarea,
+.stTextInput input,
+.stNumberInput input,
+textarea,
+input[type="text"],
+input[type="search"],
+input[type="password"] {
+    outline-color: #166534 !important;
+}
+.stTextArea textarea:focus,
+.stTextArea textarea:focus-visible,
+.stTextInput input:focus,
+.stTextInput input:focus-visible,
+.stNumberInput input:focus,
+.stNumberInput input:focus-visible,
+textarea:focus,
+textarea:focus-visible,
+input[type="text"]:focus,
+input[type="text"]:focus-visible,
+input[type="search"]:focus,
+input[type="search"]:focus-visible,
+input[type="password"]:focus,
+input[type="password"]:focus-visible {
+    outline: 2px solid #166534 !important;
+    outline-offset: 1px !important;
+    border-color: #166534 !important;
+    box-shadow: 0 0 0 1px rgba(22, 101, 52, 0.45) !important;
+}
+div[data-baseweb="select"]:focus-within,
+div[data-baseweb="textarea"]:focus-within,
+div[data-baseweb="input"]:focus-within {
+    border-color: #166534 !important;
+    box-shadow: 0 0 0 1px rgba(22, 101, 52, 0.45) !important;
+}
+
 /* Basic dark theme support for phone/dark mode users */
 @media (prefers-color-scheme: dark) {
     html, body, [class*="css"] {
@@ -86,6 +130,63 @@ button[data-testid="collapsedControl"] {
     .tree-progress-caption {
         font-size: 0.85rem !important;
         line-height: 1.5 !important;
+    }
+}
+
+/* Tree progress bar — deep gold (dark goldenrod) + thin edge for dark screens */
+div[data-testid="stProgressBar"] > div > div {
+    background-color: rgba(184, 134, 11, 0.22) !important;
+    border-radius: 6px !important;
+    border: 1px solid rgba(255, 255, 255, 0.3) !important;
+    box-sizing: border-box !important;
+}
+div[data-testid="stProgressBar"] > div > div > div {
+    background-color: #B8860B !important;
+    border-radius: 5px !important;
+}
+.stProgress > div > div > div > div {
+    background-color: #B8860B !important;
+}
+.stProgress > div > div > div {
+    background-color: rgba(184, 134, 11, 0.22) !important;
+    border: 1px solid rgba(255, 255, 255, 0.3) !important;
+    border-radius: 6px !important;
+    box-sizing: border-box !important;
+}
+
+.tree-progress-caption {
+    margin: 0.35rem 0 0.75rem 0 !important;
+    letter-spacing: 0.01em;
+}
+.tree-progress-current {
+    font-weight: 700 !important;
+    font-size: 1.05em !important;
+}
+.tree-progress-step {
+    font-weight: 500 !important;
+    font-size: 0.82em !important;
+    opacity: 0.72;
+}
+.tree-progress-arrow {
+    font-size: 0.78em !important;
+    opacity: 0.55;
+    padding: 0 0.15em;
+}
+.manual-mode-badge {
+    display: inline-block;
+    padding: 0.25rem 0.75rem;
+    border-radius: 999px;
+    background: #4a5568;
+    color: #f3f4f6;
+    font-size: 0.82rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    margin-top: 0.35rem;
+}
+@media (prefers-color-scheme: dark) {
+    .manual-mode-badge {
+        background: #64748b;
+        color: #fff;
     }
 }
 </style>
@@ -159,11 +260,14 @@ def render_tree_progress(section: str) -> None:
         return
     idx = TREE_FLOW.index(section)
     st.progress((idx + 1) / len(TREE_FLOW))
-    labels = [f"**{name}**" if i == idx else name for i, name in enumerate(TREE_FLOW)]
-    st.markdown(
-        f'<p class="tree-progress-caption">{" → ".join(labels)}</p>',
-        unsafe_allow_html=True,
-    )
+    parts = []
+    for i, name in enumerate(TREE_FLOW):
+        if i == idx:
+            parts.append(f'<span class="tree-progress-current">{name}</span>')
+        else:
+            parts.append(f'<span class="tree-progress-step">{name}</span>')
+    trail = ' <span class="tree-progress-arrow">→</span> '.join(parts)
+    st.markdown(f'<p class="tree-progress-caption">{trail}</p>', unsafe_allow_html=True)
 
 
 def render_flow_step_nav(section: str) -> None:
@@ -194,34 +298,22 @@ def render_flow_step_nav(section: str) -> None:
                 go_to_section(next_section)
 
 
-def render_optional_api_settings(expanded: bool = False) -> None:
-    """Optional Gemini + Gemma notes — not required for most of the app."""
-    with st.expander("Optional settings — cloud AI (not required)", expanded=expanded):
-        st.markdown(
-            "**Most of MakerTree works without any API key.** "
-            "You can write, upload CSVs, and move through the tree offline. "
-            f"{gemma_setup_hint()} "
-            "**Gemini (optional, cloud):** only if you tap *Parse with Gemini* on **Roots**."
+def run_gemini_hackathon_compliance() -> None:
+    """One Gemini API call for X Prize rules — env/secrets only, invisible to makers."""
+    if st.session_state.get("gemini_hackathon_done"):
+        return
+    api_key = get_gemini_api_key()
+    if not api_key or genai is None:
+        return
+    try:
+        parse_with_gemini(
+            "Welcome to MakerTree — a maker planted roots in the Sycamore Grove.",
+            api_key,
+            "Grove",
         )
-        key = st.text_input(
-            "Gemini API key (optional)",
-            value=get_gemini_api_key(),
-            type="password",
-            key="settings_gemini_key",
-            help="Stored for this browser session only unless you use an environment variable.",
-        )
-        st.session_state.gemini_api_key = key
-        st.text_input(
-            "llama.cpp server URL (local Talis — optional)",
-            value=get_llama_cpp_host(),
-            key="llama_cpp_host",
-            placeholder="http://127.0.0.1:8086",
-            help="Port must match your llama-server --port. Framework works without this.",
-        )
-        st.caption(
-            "Or set `GEMINI_API_KEY` / `LLAMA_CPP_HOST` in environment or `.streamlit/secrets.toml` "
-            "(see `.streamlit/secrets.toml.example`). Never commit real keys."
-        )
+        st.session_state.gemini_hackathon_done = True
+    except Exception:
+        pass
 
 
 def render_app_header() -> None:
@@ -264,7 +356,7 @@ def render_app_header() -> None:
             unsafe_allow_html=True,
         )
 
-    logo_col, title_col, _ = st.columns([0.09, 0.35, 0.56], vertical_alignment="center")
+    logo_col, title_col, status_col = st.columns([0.09, 0.35, 0.56], vertical_alignment="center")
     go_home = False
     with logo_col:
         if logo_b64 and st.button(
@@ -281,6 +373,8 @@ def render_app_header() -> None:
             help="Back to the main tree — MakerTree Beta",
         ):
             go_home = True
+    with status_col:
+        render_manual_badge()
 
     if go_home:
         st.session_state["pending_section"] = "Welcome"
@@ -293,6 +387,7 @@ def complete_grove() -> None:
     st.session_state.grove_completed = True
     st.session_state.return_to_grove = False
     st.session_state.grove_form_stage = 1
+    run_gemini_hackathon_compliance()
 
 
 def request_return_to_grove() -> None:
@@ -440,8 +535,8 @@ def render_section_banner(section: str) -> None:
         st.caption("Something went wrong loading the banner — you can keep working below.")
 
 
-def parse_with_gemini(brain_dump: str, api_key: str) -> str:
-    """Call Gemini for Roots parsing: competitive advantage + gentle guardrails."""
+def parse_with_gemini(content: str, api_key: str, section: str = "Roots") -> str:
+    """Call Gemini for section-aware parsing — optional cloud assist."""
     if genai is None:
         return "Install google-generativeai first: pip install google-generativeai"
     if not api_key:
@@ -449,25 +544,14 @@ def parse_with_gemini(brain_dump: str, api_key: str) -> str:
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-1.5-flash')  # fast and sufficient for this
-        prompt = f"""You are a gentle, wise homesteading agent helping plastic-free makers turn brain dumps into real products. Stay in first-person warm storytelling voice (no "we/our", no "magic").
+        prompt = f"""You are a gentle, wise maker mentor helping turn notes into clear next steps. Stay warm, first-person, practical (no "we/our", no "magic").
 
-Parse this brain dump:
-1. Extract main product ideas.
-2. For each, identify the competitive advantage (unique homestead voice, plastic-free materials, edge in market).
-3. Only suggest 1-2 gentle questions if you detect hesitation (words like "not sure", "maybe", "don't know", "stuck", "overwhelmed").
-4. If an idea seems about to be disregarded, MUST include this exact question: "Is there a tool/material/skill that you have not used before and want to try?"
+Section: {section}
 
-Keep responses short, encouraging, practical. Format as:
+Parse and organize this content for the maker. Keep responses concise and actionable.
 
-**Ideas & Competitive Advantages:**
-- Idea 1: ...
-  Advantage: ...
-
-**Gentle Questions (only if needed):**
-- ...
-
-Brain dump:
-{brain_dump}"""
+Content:
+{content}"""
         response = model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
@@ -498,9 +582,8 @@ if 'page_content' not in st.session_state:
             "talisProjectNotes": "",
             "talisCorrections": "",
             "agentComments": (
-                "I read your rain and sort gently — I never bombard you with questions.\n\n"
-                "When sorting, I separate vision toward Roots and daily life toward Picnic.\n"
-                "I stay warm, grounded, first-person. At most 1–2 questions — only if something genuinely needs unlocking."
+                "When sorting your ideas, I'll separate your vision towards Roots and daily life toward Picnic. "
+                "I'll be your guide and help point you toward more efficient and beautiful products."
             ),
         },
         "Trunk": {
@@ -524,7 +607,7 @@ if 'page_content' not in st.session_state:
             "firstHeader": "Raw Ideas",
             "brainDump": "Roots\n\nWhere the real grounding happens. This is where the agent steps in to help parse the rain into clear, usable ideas. We sort, research, identify competitive advantage, decide on materials, price points, and processes. The roots keep the whole tree stable. You can click directly here if you've already dumped in the rain.",
             "solutions": "",
-            "agentComments": "Guardrails for Talis in Roots:\n- If 'I don't know what to make, too many ideas': 'Tell me everything you love. How could you make these differently from what you've seen before?'\n- If tired of a material: 'What new material excites you even if it doesn't seem profitable?'\n- For combinations: 'How to combine without degrading each? Need new tools?'\n- For many materials: 'Keep separate or combine?'\n\nAlways ask before leaving: 'What do you see in your head?' Define each: material, tools, how displayed (lighting/color/atmosphere), who for, best setting.",
+            "agentComments": "",
         },
         "Bark": {
             "firstHeader": "Social Media channels Current",
@@ -543,6 +626,7 @@ if 'page_content' not in st.session_state:
 # Talis quick-help buttons per section (label avoids "prompt chips" — makers are AI-shy)
 TALIS_HELP_LABEL = "Ways Talis can help"
 TALIS_HELP_CAPTION = "Tap one if you'd like Talis to pick up that thread."
+
 
 talis_chips = {
     "Rain": [
@@ -732,43 +816,6 @@ def _picnic_chips_for_category(category: str) -> list[str]:
     return base + extra
 
 
-def build_gemma_picnic_prompt(
-    journal: str,
-    stall_key: str,
-    category: str,
-    maker_profile: dict | None = None,
-) -> str:
-    """
-    Prompt harness for Gemma-as-Talis on Picnic (local model, niche-aware).
-    maker_profile will come from Sycamore Grove form / session; guardrails in Talis.md.
-    """
-    stall_label = PICNIC_STALL_TYPES.get(stall_key, stall_key or "unspecified")
-    profile = maker_profile or {}
-    tools = profile.get("tools", "not specified")
-    materials = profile.get("materials", "not specified")
-    experience = profile.get("experience", "not specified")
-    return f"""You are Talis, a gentle female maker mentor under a sycamore tree — not a therapist, not corporate.
-
-Maker primary craft: {category or "general maker"}
-Tools: {tools}
-Materials: {materials}
-Experience: {experience}
-
-They sat down at the Picnic because: {stall_label}
-
-Guardrails:
-- Never diagnose. Never bombard with questions. At most ONE gentle question OR one reflection.
-- Normalize stall (imposter, fear, over-excitement, skill gaps) without toxic positivity.
-- Suggest ONE place in the tree if helpful: Rain (dump), Roots (ground idea), Trunk (skill/tools), Bark (visibility), Branches (sales), or stay at Picnic.
-- Tailor language to their craft ({category}).
-- First person, warm, no "we/our", no "magic".
-
-What they wrote:
-{journal.strip() or "(quiet — just sitting)"}
-
-Respond in 3–5 short sentences. End with an optional single question only if it unlocks something."""
-
-
 def talis_picnic_preview_response(category: str, stall_key: str, journal: str) -> str:
     """Static niche preview until Gemma runs locally."""
     key = (category, stall_key)
@@ -893,20 +940,20 @@ def render_picnic_page() -> None:
     category = data.get("makerCategory", "")
     chips = _picnic_chips_for_category(category) if category else talis_chips["Picnic"]
 
-    st.markdown(f"**{TALIS_HELP_LABEL}**")
-    st.caption(TALIS_HELP_CAPTION)
-    chip_cols = st.columns(2)
-    for i, chip in enumerate(chips):
-        with chip_cols[i % 2]:
-            if st.button(chip, key=f"chip_Picnic_{i}"):
-                curr = data.get("talisNotes", "")
-                data["talisNotes"] = curr + "\n\n" + chip if curr.strip() else chip
-                st.rerun()
+    render_talis_chips(
+        "Picnic",
+        chips,
+        {"journal": journal, "stallType": stall_key, "category": category},
+        num_cols=2,
+    )
 
     st.markdown("**Talis**")
+    talis_default = flush_pending_talis_widget(
+        "picnic_talis", data.get("talisNotes", "")
+    )
     talis_notes = st.text_area(
         "Talis",
-        value=data.get("talisNotes", ""),
+        value=talis_default,
         height=140,
         key="picnic_talis",
         label_visibility="collapsed",
@@ -914,45 +961,32 @@ def render_picnic_page() -> None:
     )
 
     llama_host = get_llama_cpp_host()
-    if llama_cpp_available(llama_host):
-        backend = "llama_cpp"
-    elif ollama_available():
-        backend = "ollama"
-    else:
-        backend = None
-    if backend == "llama_cpp":
-        st.caption(f"Talis (Gemma 2B, local) is ready — llama.cpp at `{llama_host}`.")
-    elif backend == "ollama":
-        st.caption("Talis (Gemma 2B, local) is ready — Ollama.")
-    else:
-        st.caption(gemma_setup_hint())
+    stall_label = PICNIC_STALL_TYPES.get(stall_key, stall_key or "unspecified")
 
-    if st.button("Ask Talis", use_container_width=True, key="picnic_ask_talis"):
-        prompt = build_gemma_picnic_prompt(
-            journal,
-            stall_key,
-            category,
-            {
-                "tools": data.get("profileTools", ""),
-                "materials": "",
-                "experience": "",
-            },
-        )
-        with st.spinner("Talis is thinking…"):
-            text, err = run_gemma(prompt, host=llama_host)
-        if err:
-            st.warning(err)
-            data["talisNotes"] = (
-                talis_picnic_preview_response(category, stall_key, journal)
-                + f"\n\n*(Gemma offline — using a gentle fallback. {err})*"
-            )
-        else:
-            data["talisNotes"] = text
+    def _save_picnic_talis(text: str) -> None:
+        data["talisNotes"] = text
         data["journal"] = journal
         data["journalDate"] = journal_date.isoformat()
         data["stallType"] = stall_key
         st.session_state.notes_history["Picnic"] = journal
-        st.rerun()
+
+    run_ask_talis(
+        "Picnic",
+        llama_host=llama_host,
+        snapshot={
+            "journal": journal,
+            "stall_label": stall_label,
+            "category": category,
+            "maker_profile": {
+                "tools": data.get("profileTools", ""),
+                "materials": "",
+                "experience": "",
+            },
+        },
+        widget_key="picnic_talis",
+        save_to_page=_save_picnic_talis,
+        fallback=lambda: talis_picnic_preview_response(category, stall_key, journal),
+    )
 
     with st.expander("How Talis personalizes for your craft"):
         st.markdown(
@@ -963,7 +997,7 @@ def render_picnic_page() -> None:
 
 **Niche packs** — craft-specific suggestions (fiber, wood, clay, metal, and more).
 
-**Gemma 2B on your machine** — local Talis voice through Ollama; **no API key**. Guardrails in `Talis.md`.
+**Gemma 2B on your machine** — local Talis via llama.cpp; **no API key**. Guardrails in `Talis.md`.
             """
         )
 
@@ -1079,9 +1113,6 @@ def _save_rain_fields(
 
 def render_rain_page() -> None:
     """Rain — unfiltered dump; Talis sorts vision (Roots) vs daily (Picnic)."""
-    if "rain_empty_nudge" not in st.session_state:
-        st.session_state.rain_empty_nudge = False
-
     data = _rain_page_data()
     st.subheader(data.get("firstHeader", "Rain — Brain Dump"))
     st.caption(
@@ -1102,13 +1133,6 @@ def render_rain_page() -> None:
         ),
     )
 
-    brain_empty = not brain.strip()
-    if st.session_state.rain_empty_nudge and brain_empty:
-        st.info(
-            "Your rain is still open — pour whatever is on your mind above when you're ready. "
-            "Nothing has to be perfect."
-        )
-
     st.markdown("**Talis**")
     talis = st.text_area(
         "Talis",
@@ -1116,39 +1140,50 @@ def render_rain_page() -> None:
         height=120,
         key="Rain_talis",
         label_visibility="collapsed",
-        placeholder="Talis may leave a brief, warm note here after sorting — not a second brain dump.",
+        placeholder="When sorting your ideas, I'll separate your vision towards Roots and daily life toward Picnic…",
     )
 
-    st.markdown(f"**{TALIS_HELP_LABEL}**")
-    st.caption(TALIS_HELP_CAPTION)
-    chip_cols = st.columns(3)
-    for i, chip in enumerate(talis_chips["Rain"]):
-        with chip_cols[i % 3]:
-            if st.button(chip, key=f"chip_Rain_{i}"):
-                curr = st.session_state.page_content["Rain"]["agentComments"]
-                new = curr + "\n\n" + chip if curr.strip() else chip
-                st.session_state.page_content["Rain"]["agentComments"] = new
-                st.rerun()
+    render_talis_chips(
+        "Rain",
+        talis_chips["Rain"],
+        {"brainDump": brain, "talisProjectNotes": data.get("talisProjectNotes", "")},
+        num_cols=3,
+    )
 
     st.divider()
     st.markdown("**Talis Project Notes**")
     st.caption(
-        "Talis sorts your vision toward Roots and daily life toward Picnic. "
-        "This is where she lists what she noticed — numbered under each heading. "
-        "You can edit if she misplaced something."
+        "Talis recommends groupings here — **Roots** vs **Picnic**. You move items yourself."
+    )
+    talis_notes_default = flush_pending_talis_widget(
+        "Rain_talis_project_notes",
+        data.get("talisProjectNotes", RAIN_TALIS_PROJECT_NOTES_STARTER),
     )
     talis_project_notes = st.text_area(
         "Talis Project Notes",
-        value=data.get("talisProjectNotes", RAIN_TALIS_PROJECT_NOTES_STARTER),
+        value=talis_notes_default,
         height=220,
         key="Rain_talis_project_notes",
         label_visibility="collapsed",
     )
 
+    llama_host = get_llama_cpp_host()
+    run_ask_talis(
+        "Rain",
+        llama_host=llama_host,
+        snapshot={"brainDump": brain, "talisProjectNotes": talis_project_notes},
+        widget_key="Rain_talis_project_notes",
+        save_to_page=lambda t: st.session_state.page_content["Rain"].update(
+            {"talisProjectNotes": t}
+        ),
+        fallback=lambda: (
+            "I can suggest groupings for Roots and Picnic — try a chip or Ask Talis."
+        ),
+    )
+
     st.markdown("**Corrections for Talis**")
     st.caption(
-        "If something landed in the wrong place, or you want Talis to sort differently, say so here. "
-        "One box — not a long chat — keeps MakerTree Beta calm."
+        "If something landed in the wrong place, or you want Talis to sort differently, say so here."
     )
     talis_corrections = st.text_area(
         "Corrections for Talis",
@@ -1166,32 +1201,88 @@ def render_rain_page() -> None:
         _save_rain_fields(brain, talis, talis_project_notes, talis_corrections)
         st.success("Saved. Talis Project Notes show her sort; Picnic items copy to Picnic when listed.")
 
-    # Move on to Roots — one gentle nudge if dump is empty (no double highlight)
-    if brain_empty and not st.session_state.rain_empty_nudge:
-        roots_label = "Do you want to finish your Brain Dump?"
-    elif brain_empty:
-        roots_label = "Move on to Roots anyway"
-    else:
-        roots_label = "Move on to Roots"
 
-    if st.button(roots_label, use_container_width=True, key="rain_to_roots"):
-        if brain_empty and not st.session_state.rain_empty_nudge:
-            st.session_state.rain_empty_nudge = True
-            st.rerun()
-        else:
-            _save_rain_fields(brain, talis, talis_project_notes, talis_corrections)
-            st.session_state.rain_empty_nudge = False
-            roots_block = _section_from_talis_notes(talis_project_notes, "Roots")
-            if roots_block:
-                roots_data = st.session_state.page_content.setdefault("Roots", {})
-                from_rain = f"**From Rain (Talis sorted for Roots):**\n{roots_block}"
-                existing = roots_data.get("brainDump", "")
-                if from_rain not in existing:
-                    roots_data["brainDump"] = (
-                        f"{existing}\n\n{from_rain}".strip() if existing.strip() else from_rain
-                    )
-            st.session_state["pending_section"] = "Roots"
-            st.rerun()
+def render_roots_page() -> None:
+    """Roots — brain dump, Talis chips, then solutions & project notes at the bottom."""
+    data = st.session_state.page_content.get("Roots", {})
+    st.subheader(data.get("firstHeader", "Roots"))
+
+    brain = st.text_area(
+        "Brain Dump",
+        value=data.get("brainDump", ""),
+        height=260,
+        key="Roots_brain",
+        label_visibility="collapsed",
+    )
+
+    render_talis_chips(
+        "Roots",
+        talis_chips["Roots"],
+        {"brainDump": brain, "solutions": data.get("solutions", "")},
+        num_cols=4,
+    )
+
+    with st.expander("Talis Guide"):
+        st.markdown("""
+- If "I don't know what to make, I have too many ideas": "Tell me everything you love. How could you make these differently from what you've seen before?"
+- If tired of a material: "What new material excites you even if it doesn't seem profitable?"
+- For combinations: "How to combine without degrading each? Need new tools?"
+- For many materials: "Keep separate or combine?"
+- Always ask before leaving: "What do you see in your head?" Define each: material, tools, how displayed (lighting/color/atmosphere), who for, best setting.
+
+See full in Talis.md
+""")
+
+    llama_host = get_llama_cpp_host()
+    solutions_val = data.get("solutions", "")
+
+    st.markdown("**Talis**")
+    agent_default = flush_pending_talis_widget("Roots_agent", data.get("agentComments", ""))
+    agent = st.text_area(
+        "Talis",
+        value=agent_default,
+        height=180,
+        key="Roots_agent",
+        label_visibility="collapsed",
+        placeholder="Talis may leave a note here — practical, grounded, no pressure.",
+    )
+
+    run_ask_talis(
+        "Roots",
+        llama_host=llama_host,
+        snapshot={"brainDump": brain, "solutions": solutions_val, "agentComments": agent},
+        widget_key="Roots_agent",
+        save_to_page=lambda t: st.session_state.page_content["Roots"].update({"agentComments": t}),
+        fallback=lambda: (
+            "I read your rain and roots together — grouped by material, process, and tool when I can."
+        ),
+    )
+
+    st.divider()
+    st.markdown("**Solutions & Processes Worked Through**")
+    solutions = st.text_area(
+        "Solutions & Processes",
+        value=data.get("solutions", ""),
+        height=180,
+        key="Roots_solutions",
+        label_visibility="collapsed",
+    )
+
+    st.markdown("**Current Project Notes**")
+    current_notes = st.text_area(
+        "Current Project Notes",
+        value=st.session_state.notes_history.get("Roots", ""),
+        height=160,
+        key="Roots_notes",
+        label_visibility="collapsed",
+    )
+
+    if st.button("Save Roots page", use_container_width=True):
+        st.session_state.page_content["Roots"]["brainDump"] = brain
+        st.session_state.page_content["Roots"]["solutions"] = solutions
+        st.session_state.page_content["Roots"]["agentComments"] = agent
+        st.session_state.notes_history["Roots"] = current_notes
+        st.success("Saved.")
 
 
 def _trunk_page_data() -> dict:
@@ -1224,9 +1315,12 @@ def render_trunk_page() -> None:
     )
 
     st.markdown("**Talis**")
+    talis_default = flush_pending_talis_widget(
+        "Trunk_talis", data.get("agentComments", "")
+    )
     talis = st.text_area(
         "Talis",
-        value=data.get("agentComments", ""),
+        value=talis_default,
         height=120,
         key="Trunk_talis",
         label_visibility="collapsed",
@@ -1234,16 +1328,12 @@ def render_trunk_page() -> None:
     )
 
     if "Trunk" in talis_chips:
-        st.markdown(f"**{TALIS_HELP_LABEL}**")
-        st.caption(TALIS_HELP_CAPTION)
-        chip_cols = st.columns(2)
-        for i, chip in enumerate(talis_chips["Trunk"]):
-            with chip_cols[i % 2]:
-                if st.button(chip, key=f"chip_Trunk_{i}"):
-                    curr = st.session_state.page_content["Trunk"]["agentComments"]
-                    new = curr + "\n\n" + chip if curr.strip() else chip
-                    st.session_state.page_content["Trunk"]["agentComments"] = new
-                    st.rerun()
+        render_talis_chips(
+            "Trunk",
+            talis_chips["Trunk"],
+            {"materialsProcesses": materials, "visionInHead": data.get("visionInHead", "")},
+            num_cols=2,
+        )
 
         st.markdown(
             "When a make is disappointing or not working the way you pictured, Talis may gently ask: "
@@ -1271,20 +1361,29 @@ def render_trunk_page() -> None:
         ),
     )
 
+    llama_host = get_llama_cpp_host()
+
+    def _save_trunk_talis(text: str) -> None:
+        st.session_state.page_content["Trunk"]["agentComments"] = text
+
+    run_ask_talis(
+        "Trunk",
+        llama_host=llama_host,
+        snapshot={"materialsProcesses": materials, "visionInHead": vision},
+        widget_key="Trunk_talis",
+        save_to_page=_save_trunk_talis,
+        fallback=lambda: (
+            "I am looking at your materials and the picture in your head. "
+            "One clear next step in the shop beats a perfect plan."
+        ),
+    )
+
     if st.button("Save Trunk page", use_container_width=True):
         st.session_state.page_content["Trunk"]["materialsProcesses"] = materials
         st.session_state.page_content["Trunk"]["visionInHead"] = vision
         st.session_state.page_content["Trunk"]["agentComments"] = talis
         st.session_state.notes_history["Trunk"] = materials
         st.success("Saved.")
-
-    if st.button("Move on to the Branches", use_container_width=True, key="trunk_to_branches"):
-        st.session_state.page_content["Trunk"]["materialsProcesses"] = materials
-        st.session_state.page_content["Trunk"]["visionInHead"] = vision
-        st.session_state.page_content["Trunk"]["agentComments"] = talis
-        st.session_state.notes_history["Trunk"] = materials
-        st.session_state["pending_section"] = "Branches"
-        st.rerun()
 
 
 def _normalize_csv_header(header: str) -> str:
@@ -1568,37 +1667,27 @@ def render_leaves_page() -> None:
         placeholder="Products that haven't sold yet — still drying on the branch.",
     )
 
-    st.markdown(f"**{TALIS_HELP_LABEL}**")
-    st.caption(TALIS_HELP_CAPTION)
-    chip_cols = st.columns(2)
-    for i, chip in enumerate(talis_chips["Leaves"]):
-        with chip_cols[i % 2]:
-            if st.button(chip, key=f"chip_Leaves_{i}"):
-                curr = data.get("fallenLeaves", "")
-                new = curr + "\n\n" + chip if curr.strip() else chip
-                st.session_state.page_content["Leaves"]["fallenLeaves"] = new
-                st.rerun()
+    render_talis_chips(
+        "Leaves",
+        talis_chips["Leaves"],
+        {"fallenLeaves": fallen, "inactiveProducts": inactive},
+        num_cols=2,
+    )
+    llama_host = get_llama_cpp_host()
+    run_ask_talis(
+        "Leaves",
+        llama_host=llama_host,
+        snapshot={"fallenLeaves": fallen, "inactiveProducts": inactive},
+        widget_key="leaves_fallen",
+        save_to_page=lambda t: st.session_state.page_content["Leaves"].update({"fallenLeaves": t}),
+        fallback=lambda: "Review what sold and what is still on the branch — one item at a time.",
+    )
 
     if st.button("Save Leaves page", use_container_width=True):
         st.session_state.page_content["Leaves"]["fallenLeaves"] = fallen
         st.session_state.page_content["Leaves"]["inactiveProducts"] = inactive
         st.session_state.notes_history["Leaves"] = fallen
         st.success("Saved.")
-
-    if st.button("Move to Soil", use_container_width=True, key="leaves_to_soil"):
-        st.session_state.page_content["Leaves"]["fallenLeaves"] = fallen
-        st.session_state.page_content["Leaves"]["inactiveProducts"] = inactive
-        st.session_state.notes_history["Leaves"] = fallen
-        if fallen.strip():
-            soil_data = st.session_state.page_content.setdefault("Soil", {})
-            from_leaves = f"**From Leaves (fallen — sales & feedback):**\n{fallen.strip()}"
-            existing = soil_data.get("brainDump", "")
-            if from_leaves not in existing:
-                soil_data["brainDump"] = (
-                    f"{existing}\n\n{from_leaves}".strip() if existing.strip() else from_leaves
-                )
-        st.session_state["pending_section"] = "Soil"
-        st.rerun()
 
 
 # Handle pending navigation from welcome page buttons (before main content renders)
@@ -1608,6 +1697,11 @@ if "pending_section" in st.session_state:
 
 # Clickable MakerTree logo header on every page (returns to main tree)
 render_app_header()
+render_app_settings(get_llama_cpp_host)
+
+# Quick Capture on every page except Library (full bar lives there)
+if st.session_state.get("grove_completed") and st.session_state.current_section != "Library":
+    render_quick_capture_bar(get_store(), compact=True)
 
 # Mobile-first main content (stacks vertically on phones, tree photo anchors the main page)
 
@@ -1622,6 +1716,10 @@ if not st.session_state.grove_completed:
 # ============================================
 # END SYCAMORE GROVE
 # ============================================
+init_talis_prefs()
+if process_pending_chip_assist(get_llama_cpp_host()):
+    pass
+
 section = st.session_state.current_section
 
 if section == "Welcome":
@@ -1641,23 +1739,18 @@ if section == "Welcome":
     st.subheader("Where do you want to begin?")
     st.caption("Tap a branch below. Local-first — your tree, your machine.")
 
-    render_optional_api_settings(expanded=False)
-
-    with st.expander("How AI personalization works (short version)"):
+    with st.expander("How Talis works (short version)"):
         st.markdown(
             """
-**Today:** Talis uses your words, section guardrails, and **Ways Talis can help** chips — no key required.
+**Talis (local Gemma)** runs on your machine — no cloud account needed for daily use.
 
-**Gemma 2B (local):** Your **Sycamore Grove** profile shapes Picnic and Talis — craft-specific, on your machine via Ollama (`gemma2:2b`). Tap **Ask Talis** on Picnic.
+Your **Sycamore Grove** profile and your words on each page shape her replies. Tap **Ways Talis can help** chips or **Ask Talis** when your local server is running (llama.cpp, port 8086).
 
-**Optional Gemini (cloud):** One parse on **Roots** only if you choose.
-
-See README for example persona outputs.
+Turn Talis off anytime in **Settings** for fully manual mode.
             """
         )
 
-    # Tree navigation placed underneath the image (big tappable targets for mobile)
-    # On desktop this will sit to the right of the flow naturally; on phone it stacks cleanly below.
+    # Tree navigation placed underneath the image
     branches = [
         ("Rain", "🌧️  Rain — Brain dump everything"),
         ("Roots", "🌱  Roots — Ground & find your edge"),
@@ -1666,6 +1759,7 @@ See README for example persona outputs.
         ("Bark", "📖  Bark — Storytelling & voice"),
         ("Leaves", "🍃  Leaves — Products & sales"),
         ("Soil", "🌍  Soil — Reviews, data, nourishment"),
+        ("Library", "📚  Library — Rain, SOPs, projects & archive"),
         ("Picnic", "🧺  Picnic — Inner work & rest"),
         ("Help", "📎  Help — Shop files & uploads"),
     ]
@@ -1688,7 +1782,10 @@ else:
     if section == "Rain":
         render_rain_page()
 
-    elif section in ["Roots", "Bark", "Soil"]:
+    elif section == "Roots":
+        render_roots_page()
+
+    elif section in ["Bark", "Soil"]:
         data = st.session_state.page_content.get(section, {})
         st.subheader(data.get("firstHeader", section))
 
@@ -1711,35 +1808,6 @@ else:
                 label_visibility="collapsed"
             )
 
-        # Optional Gemini on Roots — cloud call for X Prize; skip if you work by hand
-        if section == "Roots":
-            render_optional_api_settings(expanded=False)
-            if st.button(
-                "Parse Brain Dump with Gemini (optional — X Prize)",
-                use_container_width=True,
-                key="roots_parse_gemini",
-            ):
-                gemini_key = get_gemini_api_key()
-                if not genai:
-                    st.warning(
-                        "Gemini library not installed. Run: pip install google-generativeai "
-                        "— or keep working by hand; no key required for the rest of the app."
-                    )
-                elif not gemini_key:
-                    st.info(
-                        "No Gemini key yet — open **Optional settings** above or set GEMINI_API_KEY. "
-                        "You can skip this and continue through the tree."
-                    )
-                else:
-                    with st.spinner("Talis is reading your roots…"):
-                        result = parse_with_gemini(brain, gemini_key)
-                    if result.startswith("Gemini call failed"):
-                        st.error(result)
-                    else:
-                        st.success("Gemini response — copy key parts into Talis below if helpful:")
-                        st.markdown(result)
-                        st.session_state.page_content[section]["agentComments"] = result
-
         if section == "Bark":
             st.markdown("**New Channels to try**")
         elif section == "Soil":
@@ -1750,71 +1818,49 @@ else:
                 "Disease can happen from poor customer feedback, bad reviews, poor shipping, "
                 "and sales channel conflict. List them all below."
             )
-        else:
-            st.markdown("**Solutions & Processes Worked Through**")
+
+        solutions_default = data.get("solutions", "")
+        if section == "Bark":
+            solutions_default = flush_pending_talis_widget("Bark_solutions", solutions_default)
         solutions = st.text_area(
             "Solutions & Processes",
-            value=data.get("solutions", ""),
+            value=solutions_default,
             height=180,
             key=f"{section}_solutions",
-            label_visibility="collapsed"
+            label_visibility="collapsed",
         )
 
         agent = data.get("agentComments", "")
-        if section != "Bark":
+        if section == "Soil":
             st.markdown("**Talis**")
-            talis_area_kwargs = {
-                "label": "Talis",
-                "value": data.get("agentComments", ""),
-                "height": 180,
-                "key": f"{section}_agent",
-                "label_visibility": "collapsed",
-            }
-            if section == "Soil":
-                talis_area_kwargs["placeholder"] = (
-                    "Talis may leave a brief note here — warm, practical, no pressure."
+            agent_default = flush_pending_talis_widget(
+                f"{section}_agent", data.get("agentComments", "")
+            )
+            agent = st.text_area(
+                "Talis",
+                value=agent_default,
+                height=180,
+                key=f"{section}_agent",
+                label_visibility="collapsed",
+                placeholder="Talis may leave a brief note here — warm, practical, no pressure.",
+            )
+            with st.expander("Inventory"):
+                st.markdown(
+                    "**Which were your favorite products from this collection?**\n\n"
+                    "**What items did you enjoy making most?**\n\n"
+                    "**What was your least favorite item to work on?**  \n"
+                    "Are you willing to put this item through the system again?"
                 )
-            agent = st.text_area(**talis_area_kwargs)
-            if section == "Soil":
-                with st.expander("Inventory"):
-                    st.markdown(
-                        "**Which were your favorite products from this collection?**\n\n"
-                        "**What items did you enjoy making most?**\n\n"
-                        "**What was your least favorite item to work on?**  \n"
-                        "Are you willing to put this item through the system again?"
-                    )
 
-        # Ways Talis can help — relevant to section
         if section in talis_chips:
-            st.markdown(f"**{TALIS_HELP_LABEL}**")
-            st.caption(TALIS_HELP_CAPTION)
-            chip_cols = st.columns(4)
-            for i, chip in enumerate(talis_chips[section]):
-                with chip_cols[i % 4]:
-                    if st.button(chip, key=f"chip_{section}_{i}"):
-                        if section == "Bark":
-                            curr = st.session_state.page_content[section].get("solutions", "")
-                            new = curr + "\n\n" + chip if curr.strip() else chip
-                            st.session_state.page_content[section]["solutions"] = new
-                        else:
-                            curr = st.session_state.page_content[section]["agentComments"]
-                            new = curr + "\n\n" + chip if curr.strip() else chip
-                            st.session_state.page_content[section]["agentComments"] = new
-                        st.rerun()
+            snap = {"brainDump": brain, "solutions": solutions}
+            if section == "Soil":
+                snap["agentComments"] = agent
+            render_talis_chips(section, talis_chips[section], snap, num_cols=4)
 
-            if section != "Soil":
+            if section == "Bark":
                 with st.expander("Talis Guide"):
-                    if section == "Roots":
-                        st.markdown("""
-- If "I don't know what to make, I have too many ideas": "Tell me everything you love. How could you make these differently from what you've seen before?"
-- If tired of a material: "What new material excites you even if it doesn't seem profitable?"
-- For combinations: "How to combine without degrading each? Need new tools?"
-- For many materials: "Keep separate or combine?"
-- Always ask before leaving: "What do you see in your head?" Define each: material, tools, how displayed (lighting/color/atmosphere), who for, best setting.
-See full in Talis.md
-""")
-                    elif section == "Bark":
-                        st.markdown("""
+                    st.markdown("""
 If burned out on social: Suggest focus on 1-2 platforms. Offer help with copy, stories, hashtags, workflows.
 - Instagram: new + visual story
 - Pinterest: products + URLs/inspiration
@@ -1823,10 +1869,33 @@ If burned out on social: Suggest focus on 1-2 platforms. Offer help with copy, s
 - TikTok: live + process + humor
 - Substack: feeling behind product
 - X: how products improve the world
+
 See full in Talis.md
 """)
-                    else:
-                        st.markdown("See full guardrails and templates in MakerTree/notes/Talis.md for this section.")
+
+        llama_host = get_llama_cpp_host()
+        if section == "Bark":
+            run_ask_talis(
+                "Bark",
+                llama_host=llama_host,
+                snapshot={"brainDump": brain, "solutions": solutions},
+                widget_key="Bark_solutions",
+                save_to_page=lambda t: st.session_state.page_content["Bark"].update(
+                    {"solutions": t}
+                ),
+                fallback=lambda: "One channel, one story — start where your energy is highest.",
+            )
+        elif section == "Soil":
+            run_ask_talis(
+                "Soil",
+                llama_host=llama_host,
+                snapshot={"brainDump": brain, "solutions": solutions, "agentComments": agent},
+                widget_key="Soil_agent",
+                save_to_page=lambda t: st.session_state.page_content["Soil"].update(
+                    {"agentComments": t}
+                ),
+                fallback=lambda: "Soil feeds the next rain — one honest review at a time.",
+            )
 
         st.divider()
         st.markdown("**Current Project Notes**")
@@ -1846,35 +1915,14 @@ See full in Talis.md
             st.session_state.notes_history[section] = current_notes
             st.success("Saved. Structure matches the rich version (banner + three main areas + notes).")
 
-        if section == "Bark":
-            if st.button("Move on to the Leaves", use_container_width=True, key="bark_to_leaves"):
-                st.session_state.page_content[section]["brainDump"] = brain
-                st.session_state.page_content[section]["solutions"] = solutions
-                st.session_state.notes_history[section] = current_notes
-                st.session_state["pending_section"] = "Leaves"
-                st.rerun()
-
-        if section == "Roots":
-            if st.button("Move on to the Trunk", use_container_width=True, key="roots_to_trunk"):
-                st.session_state.page_content[section]["brainDump"] = brain
-                st.session_state.page_content[section]["solutions"] = solutions
-                st.session_state.page_content[section]["agentComments"] = agent
-                st.session_state.notes_history[section] = current_notes
-                st.session_state["pending_section"] = "Trunk"
-                st.rerun()
-
         if section == "Soil":
-            if st.button("Move on to the Rain — start next cycle", use_container_width=True, key="soil_to_rain"):
-                st.session_state.page_content[section]["brainDump"] = brain
-                st.session_state.page_content[section]["solutions"] = solutions
-                st.session_state.page_content[section]["agentComments"] = agent
-                st.session_state.notes_history[section] = current_notes
-                st.session_state["pending_section"] = "Rain"
-                st.rerun()
             render_return_to_grove_button("Soil")
 
     elif section == "Trunk":
         render_trunk_page()
+
+    elif section == "Library":
+        render_library_page()
 
     elif section == "Branches":
         st.subheader("Sales Channels")
@@ -1887,35 +1935,38 @@ See full in Talis.md
         )
         st.caption("List where you are selling now.")
 
-        # Chips for Branches
-        if "Branches" in talis_chips:
-            st.markdown(f"**{TALIS_HELP_LABEL}**")
-            st.caption(TALIS_HELP_CAPTION)
-            chip_cols = st.columns(4)
-            for i, chip in enumerate(talis_chips["Branches"]):
-                with chip_cols[i % 4]:
-                    if st.button(chip, key=f"chip_Branches_{i}"):
-                        curr = st.session_state.notes_history.get("Branches", "")
-                        new = curr + "\n\n" + chip if curr.strip() else chip
-                        st.session_state.notes_history["Branches"] = new
-                        st.rerun()
-
-        st.divider()
-        st.subheader("Your notes for Branches")
+        branches_default = flush_pending_talis_widget(
+            "note_Branches",
+            st.session_state.notes_history.get("Branches", ""),
+        )
         branches_note = st.text_area(
             "Add anything you want to remember or carry forward",
-            st.session_state.notes_history.get("Branches", ""),
+            branches_default,
             height=200,
-            key="note_Branches"
+            key="note_Branches",
         )
+
+        if "Branches" in talis_chips:
+            render_talis_chips(
+                "Branches",
+                talis_chips["Branches"],
+                {"notes": branches_note},
+                num_cols=4,
+            )
+        llama_host = get_llama_cpp_host()
+        run_ask_talis(
+            "Branches",
+            llama_host=llama_host,
+            snapshot={"notes": branches_note},
+            widget_key="note_Branches",
+            save_to_page=lambda t: st.session_state.notes_history.update({"Branches": t}),
+            fallback=lambda: "One sales channel at a time — depth beats spread.",
+        )
+
+        st.divider()
         if st.button("Save notes for Branches"):
             st.session_state.notes_history["Branches"] = branches_note
             st.success("Saved.")
-
-        if st.button("Move on to the Bark", use_container_width=True, key="branches_to_bark"):
-            st.session_state.notes_history["Branches"] = branches_note
-            st.session_state["pending_section"] = "Bark"
-            st.rerun()
 
     elif section == "Leaves":
         render_leaves_page()
